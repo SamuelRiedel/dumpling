@@ -21,6 +21,7 @@ from dumpling.Chips import Vega
 from dumpling.Chips import Siracusa
 from dumpling.Chips import Trikarenos
 from dumpling.Chips import Cerberus
+from dumpling.Chips import Heartstream
 
 _CONTEXT_SETTINGS = dict(help_option_names=["-h", "--help"])
 
@@ -38,6 +39,7 @@ cli.add_command(Vega.vega)
 cli.add_command(Siracusa.siracusa)
 cli.add_command(Trikarenos.trikarenos)
 cli.add_command(Cerberus.cerberus)
+cli.add_command(Heartstream.heartstream)
 
 # For debugging purposes only
 if __name__ == "__main__":
@@ -47,4 +49,5 @@ if __name__ == "__main__":
     # cli(['vega', 'set-clk-bypass', '--soc_fll_bypass'])
     # cli(['vega', 'verify-mem', '0x1a100004=0x448805F5# Read Fll config 1', '0x1a100000=0x000005f5# Read Fll1 status'])
     # cli(["siracusa", "halt-core-verify-pc"])
-    cli(['siracusa', "execute-elf", "--elf", "/home/meggiman/projects/pulp/pulp-runtime-examples/hello/build/test/test"])
+    # cli(['siracusa', "execute-elf", "--elf", "/home/meggiman/projects/pulp/pulp-runtime-examples/hello/build/test/test"])
+    cli(['heartstream', '-o' 'test.avc', 'halt-core-verify-pc'])
