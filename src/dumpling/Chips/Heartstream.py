@@ -6,15 +6,16 @@ import bitstring
 import click
 from dumpling.Common.ElfParser import ElfParser
 from bitstring import BitArray
-bitstring.set_lsb0(True) #Enables the experimental mode to index LSB with 0 instead of the MSB (see thread https://github.com/scott-griffiths/bitstring/issues/156)
+bitstring.lsb0 = True #Enables the experimental mode to index LSB with 0 instead of the MSB (see thread https://github.com/scott-griffiths/bitstring/issues/156)
 from dumpling.Common.HP93000 import HP93000VectorWriter
 from dumpling.JTAGTaps.PulpJTAGTap import PULPJtagTap
 from dumpling.Common.VectorBuilder import VectorBuilder
 from dumpling.Drivers.JTAG import JTAGDriver
-from dumpling.JTAGTaps.RISCVDebugTap import RISCVDebugTap, RISCVReg
+from dumpling.JTAGTaps.RISCVDebugTap import RISCVDebugTap, RISCVReg, DMRegAddress
 
 pins = {
         'chip_reset' : {'name': 'rst_ni', 'default': '1'},
+        'wakeup': {'name': 'wake_up_i', 'default': '0'},
         'trst': {'name': 'jtag_trst_ni', 'default': '1'},
         'tms': {'name': 'jtag_tms_i', 'default': '0'},
         'tck': {'name': 'jtag_tck_i', 'default': '0'},
@@ -22,6 +23,7 @@ pins = {
         'tdo': {'name': 'jtag_tdo_o', 'default': 'X'}
     }
 CLU_WAKEUP_REG = BitArray('0x00040004')
+CLU_EOC_REG = BitArray('0x00040000')
 
 vector_builder = VectorBuilder(pins)
 jtag_driver = JTAGDriver(vector_builder)
@@ -54,8 +56,8 @@ def heartstream(ctx, port_name, wtb_name, device_cycle_name, output):
 @click.option("--elf", "-e", required=True, type=click.Path(exists=True, file_okay=True, dir_okay=False), help="The path to the elf binary to preload.")
 @click.option("--return_code", '-r', type=click.IntRange(min=0, max=255), default=0, help="Set a return code to check against during end of computation detection. A matched loop will be inserted to achieve ")
 @click.option("--eoc_wait_cycles", '-w', default=0, type=click.IntRange(min=0), help="If set to a non zero integer, wait the given number of cycles for end of computation check and bdon't use ")
-@click.option("--verify/--no_verify", default=True, help="Enables/Disables verifying the content written to L2.", show_default=True)
-@click.option("--compress", '-c', is_flag=True, default=False, show_default=True, help="Compress all vectors by merging subsequent identical vectors into a single vector with increased repeat value.")
+@click.option("--verify/--no_verify", default=False, help="Enables/Disables verifying the content written to L2.", show_default=True)
+@click.option("--compress", '-c', is_flag=False, default=False, show_default=True, help="Compress all vectors by merging subsequent identical vectors into a single vector with increased repeat value.")
 @click.option("--no_reset", is_flag=True, default=True, show_default=True, help="Don't reset the chip before executing the binary. Helpfull for debugging and to keep custom config preloaded via JTAG.")
 @click.option("--no_resume", is_flag=True, default=True, show_default=True, help="Don't resume the core.")
 @pass_VectorWriter
@@ -91,28 +93,50 @@ def execute_elf(writer: HP93000VectorWriter, elf, return_code, eoc_wait_cycles, 
             vector_writer.write_vectors(vectors, compress=compress)
 
         # Load L2 memory
-        vectors = pulp_tap.init_pulp_tap()
-        vectors += pulp_tap.loadL2(elf_binary=elf)
-        vector_writer.write_vectors(vectors, compress=compress)
+        dmcontrol =  BitArray(32)
+        dmcontrol[0] = 1
+        vectors = riscv_debug_tap.write_debug_reg(DMRegAddress.DMCONTROL, dmcontrol.bin, verify_completion=False)
+        sbcs_value = BitArray(32)
+        sbcs_value[29:32] = 0 # Zero in TB, 1 in Dumpling
+        sbcs_value[20] = 0 # SB Read on Addr
+        sbcs_value[17:20] = 2 # SB Access
+        sbcs_value[16] = 1 # SB Autoincrement
+        sbcs_value[15] = 1 # SB Read on Data
+        # Write with autoincrement to SBCS
+        vectors += riscv_debug_tap.write_debug_reg(DMRegAddress.SBCS, sbcs_value.bin, verify_completion=False)
+
+        # Parse ELF
+        stim_generator = ElfParser(verbose=False)
+        stim_generator.add_binary(elf)
+        stimuli = stim_generator.parse_binaries(4)
+        # Remember previous addr in case of gaps
+        prev_addr = None
+        for addr, word in sorted(stimuli.items()):
+            addr = int(addr)
+            word = int(word)
+            # Only write to L2 in Heartstream
+            if (addr >= int("0x00080000", 0)) and (addr < int("0x00100000", 0)):
+                # Create a new incremental write if we are not already at it or have a gap in the data
+                if (prev_addr is None) or (addr != prev_addr + 4):
+                    print(f"Writing to 0x{addr:08x}")
+                    payload = BitArray(uint=addr, length=32)
+                    vectors += riscv_debug_tap.write_debug_reg(DMRegAddress.SBADDRESS0, payload.bin, verify_completion=False)
+                # Send the data
+                print(f"|-Writing data 0x{word:08x}")
+                payload = BitArray(uint=word, length=32)
+                vectors += riscv_debug_tap.write_debug_reg(DMRegAddress.SBDATA0, payload.bin, verify_completion=False)
+                # Remember address
+                prev_addr = addr
+        vector_writer.write_vectors(vectors)
 
         # Optionally verify the data we just wrote to L2
         if verify:
-            vectors = pulp_tap.verifyL2(elf, comment="Verify the content of L2 to match the binary.")
-            vector_writer.write_vectors(vectors)
+           error("Verify is not implemented")
 
         if not no_resume:
             # Resume core
-        	vectors = riscv_debug_tap.init_dmi()
-        	vectors += riscv_debug_tap.writeMem(CLU_WAKEUP_REG, BitArray('0xFFFFFFFF'), retries=16)
-        	writer.write_vectors(vectors)
+            error("Verify is not implemented")
 
-        	if return_code != None:
-        		if eoc_wait_cycles <= 0:
-        			vectors = riscv_debug_tap.wait_for_end_of_computation(return_code, idle_vector_count=100, max_retries=10)
-        		else:
-        			vectors = [jtag_driver.jtag_idle_vector(repeat=eoc_wait_cycles, comment="Waiting for computation to finish before checking EOC register.")]
-        			vectors += riscv_debug_tap.check_end_of_computation(return_code, wait_cycles=5000)
-        		vector_writer.write_vectors(vectors, compress=compress)
 
 @heartstream.command()
 @click.option('--wait_cycles','-w', type=click.IntRange(min=1), default=10, show_default=True, help="The number of cycles to wait before verifying that core was actually resumed.")
@@ -202,8 +226,8 @@ def check_eoc(vector_writer, return_code, eoc_wait_cycles, compress):
     with vector_writer as writer:
         if return_code != None:
             if eoc_wait_cycles <= 0:
-                vectors = riscv_debug_tap.wait_for_end_of_computation(return_code, idle_vector_count=100, max_retries=10)
+                vectors = riscv_debug_tap.wait_for_end_of_computation(return_code, idle_vector_count=100, max_retries=10, eoc_reg_addr=CLU_EOC_REG)
             else:
                 vectors = [jtag_driver.jtag_idle_vector(repeat=eoc_wait_cycles, comment="Waiting for computation to finish before checking EOC register.")]
-                vectors += riscv_debug_tap.check_end_of_computation(return_code, wait_cycles=5000)
+                vectors += riscv_debug_tap.check_end_of_computation(return_code, wait_cycles=5000, eoc_reg_addr=CLU_EOC_REG)
             vector_writer.write_vectors(vectors, compress=compress)
