@@ -126,11 +126,11 @@ def execute_elf(writer: HP93000VectorWriter, elf, return_code, eoc_wait_cycles, 
             if (addr >= int("0x00080000", 0)) and (addr < int("0x00100000", 0)):
                 # Create a new incremental write if we are not already at it or have a gap in the data
                 if (prev_addr is None) or (addr != prev_addr + 4):
-                    print(f"Writing to 0x{addr:08x}")
+                    #print(f"Writing to 0x{addr:08x}")
                     payload = BitArray(uint=addr, length=32)
                     vectors += riscv_debug_tap.write_debug_reg(DMRegAddress.SBADDRESS0, payload.bin, verify_completion=False)
                 # Send the data
-                print(f"|-Writing data 0x{word:08x}")
+                #print(f"|-Writing data 0x{word:08x}")
                 payload = BitArray(uint=word, length=32)
                 vectors += riscv_debug_tap.write_debug_reg(DMRegAddress.SBDATA0, payload.bin, verify_completion=False)
                 # Remember address
@@ -204,18 +204,43 @@ def change_freq(vector_writer: HP93000VectorWriter, fll, mult, clk_div, lock, to
 
     """
     with vector_writer as writer:
-        vectors = pulp_tap.init_pulp_tap()
-        if fll == "SOC_FLL":
-            config1_address = BitArray('0x00051000')
-            config2_address = BitArray('0x00051004')
-        clk_div_value = int(math.log2(int(clk_div)))+1
-        config1_value = bitstring.pack('0b1, bool, uint:4, uint:10=136, uint:16', lock, clk_div_value, mult)
-        config2_value = bitstring.pack('bool, 0b000, uint:12, uint:6, uint:6, uint:4', enable_dithering, tolerance, stable_cycles, unstable_cycles, -loop_gain_exponent)
+    	activate_addr = BitArray(uint=int('0x00050008', 0), length=32)
+    	activate_value = BitArray(uint=int('0x00000001', 0), length=32)
+    	if fll == "SOC_FLL":
+    		config1_address = BitArray(uint=int('0x00051000', 0), length=32)
+    		config2_address = BitArray(uint=int('0x00051004', 0), length=32)
+    	clk_div_value = int(math.log2(int(clk_div)))+1
+    	
+    	config1_value = BitArray(32)
+    	config1_value[31] = 1
+    	config1_value[30] = 0
+    	config1_value[26:30] = 4
+    	config1_value[16:25] = 344
+    	config1_value[0:15] = 4 * mult
 
-        vectors += pulp_tap.write32(start_addr=config1_address, data=[config1_value], comment="Configure {}".format(fll))
-        vectors += [jtag_driver.jtag_idle_vector(repeat=wait_cycles)]
-        vectors += pulp_tap.write32(start_addr=config2_address, data=[config2_value], comment="Configure {}".format(fll))
-        writer.write_vectors(vectors)
+    	vectors = []
+    	# Config JTAG state machine
+    	dmcontrol =  BitArray(32)
+    	dmcontrol[0] = 1
+    	vectors = riscv_debug_tap.write_debug_reg(DMRegAddress.DMCONTROL, dmcontrol.bin, verify_completion=False)
+    	sbcs_value = BitArray(32)
+    	sbcs_value[29:32] = 0 # Zero in TB, 1 in Dumpling
+    	sbcs_value[20] = 0 # SB Read on Addr
+    	sbcs_value[17:20] = 2 # SB Access
+    	sbcs_value[16] = 1 # SB Autoincrement
+    	sbcs_value[15] = 1 # SB Read on Data
+    	# Write with autoincrement to SBCS
+    	vectors += riscv_debug_tap.write_debug_reg(DMRegAddress.SBCS, sbcs_value.bin, verify_completion=False)
+    	
+    	# Activate the FLL
+    	vectors += riscv_debug_tap.write_debug_reg(DMRegAddress.SBADDRESS0, activate_addr.bin, verify_completion=False)
+    	vectors += riscv_debug_tap.write_debug_reg(DMRegAddress.SBDATA0, activate_value.bin, verify_completion=False)
+    	vectors += [jtag_driver.jtag_idle_vector(repeat=wait_cycles)]
+    	# Write the configuration 1
+    	vectors += riscv_debug_tap.write_debug_reg(DMRegAddress.SBADDRESS0, config1_address.bin, verify_completion=False)
+    	vectors += riscv_debug_tap.write_debug_reg(DMRegAddress.SBDATA0, config1_value.bin, verify_completion=False)
+    	vectors += [jtag_driver.jtag_idle_vector(repeat=wait_cycles)]
+    	writer.write_vectors(vectors)
 
 
 @heartstream.command()
