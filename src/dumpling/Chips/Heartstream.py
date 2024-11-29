@@ -91,11 +91,19 @@ def execute_elf(writer: HP93000VectorWriter, elf, return_code, eoc_wait_cycles, 
             vectors = jtag_driver.jtag_reset()
             vectors += jtag_driver.jtag_idle_vectors(10)
             vector_writer.write_vectors(vectors, compress=compress)
+            vectors = []
+
+
+        vectors += riscv_debug_tap.init_dmi()
+        vectors += riscv_debug_tap.set_dmactive(True)
+        vector_writer.write_vectors(vectors, compress=compress)
+
 
         # Load L2 memory
-        dmcontrol =  BitArray(32)
-        dmcontrol[0] = 1
-        vectors = riscv_debug_tap.write_debug_reg(DMRegAddress.DMCONTROL, dmcontrol.bin, verify_completion=False)
+        vectors = []
+        # dmcontrol =  BitArray(32)
+        # dmcontrol[0] = 1
+        # vectors += riscv_debug_tap.write_debug_reg(DMRegAddress.DMCONTROL, dmcontrol.bin, verify_completion=False)
         sbcs_value = BitArray(32)
         sbcs_value[29:32] = 0 # Zero in TB, 1 in Dumpling
         sbcs_value[20] = 0 # SB Read on Addr
@@ -128,6 +136,7 @@ def execute_elf(writer: HP93000VectorWriter, elf, return_code, eoc_wait_cycles, 
                 # Remember address
                 prev_addr = addr
         vector_writer.write_vectors(vectors)
+        vectors = []
 
         # Optionally verify the data we just wrote to L2
         if verify:
